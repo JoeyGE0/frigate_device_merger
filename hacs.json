@@ -3,5 +3,5 @@
   "content_in_root": false,
   "country": ["US", "GB", "CA", "AU", "NZ"],
   "domains": ["frigate_device_merger"],
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2024.8.0"
 }
