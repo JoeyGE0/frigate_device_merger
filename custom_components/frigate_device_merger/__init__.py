@@ -55,6 +55,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Wait for Home Assistant to fully start and other integrations to initialize."""
         _LOGGER.error("Waiting 15 seconds for other integrations to initialize...")
         await asyncio.sleep(15)
+        _LOGGER.error("15 seconds elapsed, running update now...")
         await run_update()
     
     # Listen for Home Assistant start event, then wait additional time

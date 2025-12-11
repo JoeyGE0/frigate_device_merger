@@ -24,40 +24,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Frigate Device Merger from a config entry."""
     import asyncio
     
-    _LOGGER.info("=== Frigate Device Merger: Integration loaded ===")
+    _LOGGER.error("=== Frigate Device Merger: Integration loaded ===")
+    _LOGGER.error("Entry ID: %s, Entry data: %s", entry.entry_id, entry.data)
     
     # Register service in async_setup_entry (not async_setup) to avoid services.yaml requirement
     async def update_devices_service(call: ServiceCall) -> None:
         """Service to manually trigger Frigate device update."""
-        _LOGGER.info("Manual update triggered via service call")
-        await async_update_frigate_devices(hass)
+        _LOGGER.error("Manual update triggered via service call")
+        try:
+            await async_update_frigate_devices(hass)
+        except Exception as e:
+            _LOGGER.error("Error in manual update: %s", e, exc_info=True)
     
     hass.services.async_register(
         DOMAIN,
         "update_devices",
         update_devices_service,
     )
-    _LOGGER.info("Service registered: %s.update_devices", DOMAIN)
+    _LOGGER.error("Service registered: %s.update_devices", DOMAIN)
+    
+    async def run_update():
+        """Run the update with error handling."""
+        try:
+            _LOGGER.error("Running Frigate device merger update...")
+            await async_update_frigate_devices(hass)
+        except Exception as e:
+            _LOGGER.error("Error in Frigate device merger update: %s", e, exc_info=True)
     
     async def delayed_update(event: Event = None):
         """Wait for Home Assistant to fully start and other integrations to initialize."""
-        _LOGGER.info("Waiting 30 seconds for other integrations to initialize...")
-        await asyncio.sleep(30)
-        _LOGGER.info("Starting Frigate device merger update...")
-        await async_update_frigate_devices(hass)
+        _LOGGER.error("Waiting 15 seconds for other integrations to initialize...")
+        await asyncio.sleep(15)
+        _LOGGER.error("15 seconds elapsed, running update now...")
+        await run_update()
     
     # Listen for Home Assistant start event, then wait additional time
     async def on_started(event: Event):
-        _LOGGER.info("Home Assistant started, scheduling Frigate device merger update")
+        _LOGGER.error("Home Assistant started event received, scheduling update")
         hass.async_create_task(delayed_update(event))
+    
+    # Always listen for the start event
+    _LOGGER.error("Registering event listener for HOMEASSISTANT_STARTED")
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, on_started)
     
     # If already started, run immediately with delay
     if hass.is_running:
-        _LOGGER.info("Home Assistant already running, scheduling update")
+        _LOGGER.error("Home Assistant already running, scheduling immediate update")
         hass.async_create_task(delayed_update())
     else:
-        _LOGGER.info("Waiting for Home Assistant to start...")
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, on_started)
+        _LOGGER.error("Home Assistant not running yet, waiting for start event")
     
     return True
 

@@ -1,0 +1,3 @@
+update_devices:
+  name: Update devices
+  description: Manually trigger Frigate device merger update to add MAC addresses
