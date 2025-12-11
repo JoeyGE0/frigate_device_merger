@@ -5,8 +5,9 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, Event, ServiceCall
 from homeassistant.helpers import device_registry as dr
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -15,19 +16,7 @@ DOMAIN = "frigate_device_merger"
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Frigate Device Merger component."""
-    
-    async def update_frigate_devices_service(call: ServiceCall) -> None:
-        """Service to manually trigger Frigate device update."""
-        _LOGGER.info("Manual update triggered via service call")
-        await async_update_frigate_devices(hass)
-    
-    # Register service
-    hass.services.async_register(
-        DOMAIN,
-        "update_devices",
-        update_frigate_devices_service,
-    )
-    
+    _LOGGER.info("Frigate Device Merger: async_setup called")
     return True
 
 
@@ -35,13 +24,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Frigate Device Merger from a config entry."""
     import asyncio
     
-    # Wait a bit for other integrations to finish setting up
-    async def delayed_update():
-        await asyncio.sleep(10)  # Wait 10 seconds for other integrations to initialize
+    _LOGGER.info("=== Frigate Device Merger: Integration loaded ===")
+    
+    # Register service in async_setup_entry (not async_setup) to avoid services.yaml requirement
+    async def update_devices_service(call: ServiceCall) -> None:
+        """Service to manually trigger Frigate device update."""
+        _LOGGER.info("Manual update triggered via service call")
         await async_update_frigate_devices(hass)
     
-    # Schedule update after startup
-    hass.async_create_task(delayed_update())
+    hass.services.async_register(
+        DOMAIN,
+        "update_devices",
+        update_devices_service,
+    )
+    _LOGGER.info("Service registered: %s.update_devices", DOMAIN)
+    
+    async def delayed_update(event: Event = None):
+        """Wait for Home Assistant to fully start and other integrations to initialize."""
+        _LOGGER.info("Waiting 30 seconds for other integrations to initialize...")
+        await asyncio.sleep(30)
+        _LOGGER.info("Starting Frigate device merger update...")
+        await async_update_frigate_devices(hass)
+    
+    # Listen for Home Assistant start event, then wait additional time
+    async def on_started(event: Event):
+        _LOGGER.info("Home Assistant started, scheduling Frigate device merger update")
+        hass.async_create_task(delayed_update(event))
+    
+    # If already started, run immediately with delay
+    if hass.is_running:
+        _LOGGER.info("Home Assistant already running, scheduling update")
+        hass.async_create_task(delayed_update())
+    else:
+        _LOGGER.info("Waiting for Home Assistant to start...")
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, on_started)
     
     return True
 
@@ -50,6 +66,7 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
     """Update Frigate camera devices with MAC addresses from other integrations."""
     import re
     
+    _LOGGER.info("=== Starting Frigate Device Merger scan ===")
     device_registry = dr.async_get(hass)
     
     # Build a map of IP addresses to MAC addresses from other integrations
@@ -109,7 +126,9 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
         
         if ip_address and mac_address:
             ip_to_mac[ip_address] = mac_address
-            _LOGGER.debug("Found MAC %s for IP %s from %s", mac_address, ip_address, device_entry.name)
+            _LOGGER.info("Found MAC %s for IP %s from device: %s", mac_address, ip_address, device_entry.name)
+    
+    _LOGGER.info("Found %d IP-to-MAC mappings from other integrations", len(ip_to_mac))
     
     # Build a map of Frigate camera names to IPs by checking camera entities
     from homeassistant.helpers import entity_registry as er
@@ -133,16 +152,11 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 if ip_match:
                     camera_name = entity_entry.original_name or entity_entry.name or ""
                     frigate_camera_to_ip[camera_name.lower()] = ip_match.group(1)
-                    _LOGGER.debug("Found IP %s for Frigate camera '%s' from stream URL", ip_match.group(1), camera_name)
-    
-    # Also check Frigate config entries for camera info
-    for config_entry in hass.config_entries.async_entries("frigate"):
-        # Frigate might store camera config in entry data or options
-        # This is a fallback - entity scanning above should work better
-        pass
+                    _LOGGER.info("Found IP %s for Frigate camera '%s' from stream URL", ip_match.group(1), camera_name)
     
     # Now find Frigate devices and update them
     frigate_devices_updated = 0
+    frigate_camera_count = 0
     
     for device_entry in device_registry.devices.values():
         # Check if this is a Frigate device
@@ -150,6 +164,7 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
         for identifier_domain, identifier_id in device_entry.identifiers:
             if identifier_domain == "frigate":
                 is_frigate = True
+                frigate_camera_count += 1
                 break
         
         if not is_frigate:
@@ -166,7 +181,7 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
             cam_name_normalized = cam_name.lower().replace(" ", "_").replace("-", "_")
             if cam_name_normalized in camera_name_normalized or camera_name_normalized in cam_name_normalized:
                 camera_ip = cam_ip
-                _LOGGER.debug("Matched Frigate camera '%s' to IP %s from entity scan", device_name, camera_ip)
+                _LOGGER.info("Matched Frigate camera '%s' to IP %s from entity scan", device_name, camera_ip)
                 break
         
         # Method 2: Try to extract IP from device name
@@ -174,27 +189,23 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
             ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', device_name)
             if ip_match:
                 camera_ip = ip_match.group()
-                _LOGGER.debug("Extracted IP %s from Frigate device name '%s'", camera_ip, device_name)
+                _LOGGER.info("Extracted IP %s from Frigate device name '%s'", camera_ip, device_name)
         
         # Method 3: Check device's entities for stream URLs
         if not camera_ip:
-            for entity_id in device_entry.identifiers:
-                # Get entities associated with this device
-                for entity_entry in entity_registry.entities.values():
-                    if entity_entry.device_id == device_entry.id and entity_entry.domain == "camera":
-                        state = hass.states.get(entity_entry.entity_id)
-                        if state and hasattr(state, "attributes"):
-                            stream_source = state.attributes.get("stream_source") or state.attributes.get("entity_picture")
-                            if stream_source:
-                                ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', stream_source)
-                                if ip_match:
-                                    camera_ip = ip_match.group(1)
-                                    _LOGGER.debug("Found IP %s for Frigate device '%s' from entity stream", camera_ip, device_name)
-                                    break
-                        if camera_ip:
-                            break
-                if camera_ip:
-                    break
+            for entity_entry in entity_registry.entities.values():
+                if entity_entry.device_id == device_entry.id and entity_entry.domain == "camera":
+                    state = hass.states.get(entity_entry.entity_id)
+                    if state and hasattr(state, "attributes"):
+                        stream_source = state.attributes.get("stream_source") or state.attributes.get("entity_picture")
+                        if stream_source:
+                            ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', stream_source)
+                            if ip_match:
+                                camera_ip = ip_match.group(1)
+                                _LOGGER.info("Found IP %s for Frigate device '%s' from entity stream", camera_ip, device_name)
+                                break
+                    if camera_ip:
+                        break
         
         # If we found an IP, look up MAC address
         if camera_ip and camera_ip in ip_to_mac:
@@ -228,13 +239,13 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 
                 frigate_devices_updated += 1
                 _LOGGER.info(
-                    "Updated Frigate device '%s' (IP: %s) with MAC address: %s",
+                    "✓ Updated Frigate device '%s' (IP: %s) with MAC address: %s",
                     device_name,
                     camera_ip,
                     mac_address,
                 )
             else:
-                _LOGGER.debug("Frigate device '%s' already has MAC address", device_name)
+                _LOGGER.info("Frigate device '%s' already has MAC address", device_name)
         elif camera_ip:
             _LOGGER.warning(
                 "Could not find MAC address for Frigate camera '%s' (IP: %s). "
@@ -242,8 +253,34 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 device_name,
                 camera_ip,
             )
+        else:
+            _LOGGER.warning("Could not find IP address for Frigate camera '%s'", device_name)
+    
+    # Log summary
+    _LOGGER.info(
+        "=== Frigate Device Merger scan complete ==="
+    )
+    _LOGGER.info(
+        "Found %d Frigate camera(s), %d IP-to-MAC mappings, updated %d camera(s)",
+        frigate_camera_count,
+        len(ip_to_mac),
+        frigate_devices_updated
+    )
     
     if frigate_devices_updated > 0:
-        _LOGGER.info("Updated %d Frigate camera(s) with MAC addresses for device merging", frigate_devices_updated)
+        _LOGGER.info("✓ Successfully updated %d Frigate camera(s) with MAC addresses", frigate_devices_updated)
+    elif frigate_camera_count == 0:
+        _LOGGER.warning("No Frigate cameras found. Make sure Frigate integration is set up.")
+    elif len(ip_to_mac) == 0:
+        _LOGGER.warning(
+            "Found %d Frigate camera(s) but no MAC addresses from other integrations. "
+            "Make sure your camera integrations (Hikvision, Unifi, etc.) are configured.",
+            frigate_camera_count
+        )
     else:
-        _LOGGER.warning("No Frigate cameras were updated. Make sure other integrations are set up first.")
+        _LOGGER.warning(
+            "Found %d Frigate camera(s) and %d MAC address(es) but couldn't match them by IP. "
+            "Check that IP addresses match between Frigate and other integrations.",
+            frigate_camera_count,
+            len(ip_to_mac)
+        )
