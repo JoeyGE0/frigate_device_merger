@@ -225,6 +225,13 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
             continue
         
         device_name = device_entry.name or ""
+        
+        # Skip the main Frigate server device (usually just named "Frigate")
+        # We only want individual camera devices
+        if device_name.lower() == "frigate" or device_name.lower().startswith("frigate "):
+            _LOGGER.debug("Skipping main Frigate server device: %s", device_name)
+            continue
+        
         camera_name_normalized = device_name.lower().replace(" ", "_").replace("-", "_")
         
         # Try to find IP for this Frigate camera
