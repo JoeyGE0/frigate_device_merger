@@ -16,6 +16,22 @@ DOMAIN = "frigate_device_merger"
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Frigate Device Merger component."""
+    from homeassistant.core import ServiceCall
+    
+    async def update_devices_service(call: ServiceCall) -> None:
+        """Service to manually trigger Frigate device update."""
+        _LOGGER.info("Manual update triggered via service call")
+        await async_update_frigate_devices(hass)
+    
+    # Register service
+    hass.services.async_register(
+        DOMAIN,
+        "update_devices",
+        update_devices_service,
+    )
+    
+    _LOGGER.info("Frigate Device Merger service registered: %s.update_devices", DOMAIN)
+    
     return True
 
 
@@ -23,21 +39,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Frigate Device Merger from a config entry."""
     import asyncio
     
+    _LOGGER.info("Frigate Device Merger integration loaded")
+    
     async def delayed_update(event: Event = None):
         """Wait for Home Assistant to fully start and other integrations to initialize."""
         # Wait longer for everything to be ready
+        _LOGGER.info("Waiting 30 seconds for other integrations to initialize...")
         await asyncio.sleep(30)
         _LOGGER.info("Starting Frigate device merger update...")
         await async_update_frigate_devices(hass)
     
     # Listen for Home Assistant start event, then wait additional time
     async def on_started(event: Event):
+        _LOGGER.info("Home Assistant started, scheduling Frigate device merger update")
         hass.async_create_task(delayed_update(event))
     
     # If already started, run immediately with delay
     if hass.is_running:
+        _LOGGER.info("Home Assistant already running, scheduling update")
         hass.async_create_task(delayed_update())
     else:
+        _LOGGER.info("Waiting for Home Assistant to start...")
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, on_started)
     
     return True
