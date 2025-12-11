@@ -1,7 +1,7 @@
 {
   "domain": "frigate_device_merger",
   "name": "Frigate Device Merger",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "documentation": "https://github.com/JoeyGE0/frigate_device_merger",
   "issue_tracker": "https://github.com/JoeyGE0/frigate_device_merger/issues",
   "requirements": [],
