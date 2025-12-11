@@ -271,8 +271,8 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 # Update device registry
                 device_registry.async_update_device(
                     device_entry.id,
-                    identifiers=new_identifiers,
-                    connections=new_connections,
+                    new_identifiers=new_identifiers,
+                    new_connections=new_connections,
                 )
                 
                 frigate_devices_updated += 1
