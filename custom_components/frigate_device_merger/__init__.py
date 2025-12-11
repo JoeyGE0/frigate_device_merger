@@ -145,29 +145,29 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
     
     _LOGGER.info("Found %d IP-to-MAC mappings from other integrations", len(ip_to_mac))
     
-    # Build a map of Frigate camera names to IPs by checking camera entities
-    from homeassistant.helpers import entity_registry as er
-    entity_registry = er.async_get(hass)
+    # Build a map of camera names to IPs from other integrations' config entries
+    # This is more reliable than trying to extract from Frigate stream URLs (which go through go2rtc proxy)
+    camera_name_to_ip: dict[str, str] = {}
     
-    frigate_camera_to_ip: dict[str, str] = {}
-    
-    # Scan Frigate camera entities to extract IPs from stream URLs
-    for entity_entry in entity_registry.entities.values():
-        if entity_entry.platform != "frigate" or entity_entry.domain != "camera":
-            continue
-        
-        # Try to get camera entity state to extract stream URL
-        state = hass.states.get(entity_entry.entity_id)
-        if state and hasattr(state, "attributes"):
-            # Check for stream source or RTSP URL in attributes
-            stream_source = state.attributes.get("stream_source") or state.attributes.get("entity_picture")
-            if stream_source:
-                # Extract IP from RTSP URL (rtsp://user:pass@IP:port/...)
-                ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', stream_source)
+    # Scan config entries from camera integrations to build name->IP map
+    for config_entry in hass.config_entries.async_entries():
+        if config_entry.domain in ("hikvision_isapi", "unifiprotect", "reolink"):
+            host = config_entry.data.get("host", "")
+            if host:
+                # Try to extract IP
+                ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', host)
                 if ip_match:
-                    camera_name = entity_entry.original_name or entity_entry.name or ""
-                    frigate_camera_to_ip[camera_name.lower()] = ip_match.group(1)
-                    _LOGGER.info("Found IP %s for Frigate camera '%s' from stream URL", ip_match.group(1), camera_name)
+                    ip_address = ip_match.group()
+                    # Get device name from device registry
+                    device_registry_temp = dr.async_get(hass)
+                    for device_entry in device_registry_temp.devices.values():
+                        if config_entry.entry_id in device_entry.config_entries:
+                            device_name = device_entry.name or ""
+                            # Normalize name for matching
+                            name_normalized = device_name.lower().replace(" ", "_").replace("-", "_")
+                            camera_name_to_ip[name_normalized] = ip_address
+                            _LOGGER.info("Mapped camera name '%s' to IP %s from %s integration", device_name, ip_address, config_entry.domain)
+                            break
     
     # Now find Frigate devices and update them
     frigate_devices_updated = 0
@@ -191,13 +191,10 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
         # Try to find IP for this Frigate camera
         camera_ip = None
         
-        # Method 1: Check our map from entity scanning
-        for cam_name, cam_ip in frigate_camera_to_ip.items():
-            cam_name_normalized = cam_name.lower().replace(" ", "_").replace("-", "_")
-            if cam_name_normalized in camera_name_normalized or camera_name_normalized in cam_name_normalized:
-                camera_ip = cam_ip
-                _LOGGER.info("Matched Frigate camera '%s' to IP %s from entity scan", device_name, camera_ip)
-                break
+        # Method 1: Match by camera name from other integrations
+        if camera_name_normalized in camera_name_to_ip:
+            camera_ip = camera_name_to_ip[camera_name_normalized]
+            _LOGGER.info("Matched Frigate camera '%s' to IP %s by name", device_name, camera_ip)
         
         # Method 2: Try to extract IP from device name
         if not camera_ip:
