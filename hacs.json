@@ -1,0 +1,7 @@
+{
+  "name": "Frigate Device Merger",
+  "content_in_root": false,
+  "country": ["US", "GB", "CA", "AU", "NZ"],
+  "domains": ["frigate_device_merger"],
+  "homeassistant": "2024.1.0"
+}
