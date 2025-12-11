@@ -116,32 +116,52 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
             continue
         
         # Try to get IP address from config entry data
+        # Only trust IPs from camera integrations, and only if they make sense
         ip_address = None
         for config_entry_id in device_entry.config_entries:
             config_entry = hass.config_entries.async_get_entry(config_entry_id)
-            if config_entry:
-                # Check common integration config fields for IP/host
+            if config_entry and config_entry.domain in ("hikvision_isapi", "unifiprotect", "reolink"):
+                # Only get IP from camera integrations
                 if "host" in config_entry.data:
-                    ip_address = config_entry.data["host"]
-                elif "ip_address" in config_entry.data:
-                    ip_address = config_entry.data["ip_address"]
-                elif "url" in config_entry.data:
-                    # Extract IP from URL
-                    url = config_entry.data["url"]
-                    ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', url)
+                    host = config_entry.data["host"]
+                    # Extract IP from host (might be hostname or IP)
+                    ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', host)
                     if ip_match:
                         ip_address = ip_match.group()
+                        # Validate it's a private IP (cameras are usually on local network)
+                        if ip_address.startswith(("192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.")):
+                            break
+                        else:
+                            ip_address = None  # Not a private IP, probably wrong
+                elif "ip_address" in config_entry.data:
+                    ip_address = config_entry.data["ip_address"]
+                    if ip_address.startswith(("192.168.", "10.", "172.16.")):
+                        break
+                    else:
+                        ip_address = None
         
-        # Fallback: try to extract IP from device name
+        # Fallback: try to extract IP from device name (but be careful - device names might have wrong IPs)
         if not ip_address:
             device_name = device_entry.name or ""
             ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', device_name)
             if ip_match:
-                ip_address = ip_match.group()
+                potential_ip = ip_match.group()
+                # Only trust private IPs from device names
+                if potential_ip.startswith(("192.168.", "10.", "172.16.")):
+                    ip_address = potential_ip
         
         if ip_address and mac_address:
-            ip_to_mac[ip_address] = mac_address
-            _LOGGER.info("Found MAC %s for IP %s from device: %s", mac_address, ip_address, device_entry.name)
+            # Only add if we haven't seen this IP before, or log a warning if there's a conflict
+            if ip_address in ip_to_mac and ip_to_mac[ip_address] != mac_address:
+                _LOGGER.warning(
+                    "IP %s already mapped to MAC %s, but device '%s' has MAC %s. "
+                    "Skipping this mapping to avoid conflicts.",
+                    ip_address, ip_to_mac[ip_address], device_entry.name, mac_address
+                )
+            else:
+                ip_to_mac[ip_address] = mac_address
+                _LOGGER.info("Found MAC %s for IP %s from device: %s (%s)", 
+                           mac_address, ip_address, device_entry.name, config_entry.domain if config_entry else "unknown")
     
     _LOGGER.info("Found %d IP-to-MAC mappings from other integrations", len(ip_to_mac))
     
