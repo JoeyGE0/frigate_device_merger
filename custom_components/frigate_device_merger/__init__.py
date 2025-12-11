@@ -146,34 +146,67 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
     _LOGGER.info("Found %d IP-to-MAC mappings from other integrations", len(ip_to_mac))
     
     # Build a map of camera names to IPs from other integrations' config entries
-    # This is more reliable than trying to extract from Frigate stream URLs (which go through go2rtc proxy)
+    # We match Frigate camera device names to other integration device names, then get IP from config
     camera_name_to_ip: dict[str, str] = {}
     
-    # Scan config entries from camera integrations to build name->IP map
-    for config_entry in hass.config_entries.async_entries():
-        if config_entry.domain in ("hikvision_isapi", "unifiprotect", "reolink"):
-            host = config_entry.data.get("host", "")
-            if host:
-                # Try to extract IP
-                ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', host)
-                if ip_match:
-                    ip_address = ip_match.group()
-                    # Get device name from device registry
-                    for device_entry in device_registry.devices.values():
-                        if config_entry.entry_id in device_entry.config_entries:
-                            device_name = device_entry.name or ""
-                            # Normalize name for matching - try multiple variations
-                            name_variations = [
-                                device_name.lower().replace(" ", "_").replace("-", "_"),
-                                device_name.lower().replace(" ", "_"),
-                                device_name.lower().replace("-", "_"),
-                                device_name.lower(),
-                            ]
-                            for name_var in name_variations:
-                                camera_name_to_ip[name_var] = ip_address
-                            _LOGGER.info("Mapped camera name '%s' (variations: %s) to IP %s from %s integration", 
-                                       device_name, name_variations[:2], ip_address, config_entry.domain)
-                            break
+    # First, build IP->device_name map from devices we already scanned
+    ip_to_device_names: dict[str, list[str]] = {}
+    for device_entry in device_registry.devices.values():
+        # Skip Frigate devices
+        is_frigate = False
+        for identifier_domain, _ in device_entry.identifiers:
+            if identifier_domain == "frigate":
+                is_frigate = True
+                break
+        if is_frigate:
+            continue
+        
+        # Get MAC address
+        mac_address = None
+        for connection_type, connection_id in device_entry.connections:
+            if connection_type == dr.CONNECTION_NETWORK_MAC:
+                mac_address = connection_id.lower()
+                break
+        
+        if not mac_address:
+            continue
+        
+        # Get IP address (same logic as before)
+        ip_address = None
+        for config_entry_id in device_entry.config_entries:
+            config_entry = hass.config_entries.async_get_entry(config_entry_id)
+            if config_entry:
+                if "host" in config_entry.data:
+                    host = config_entry.data["host"]
+                    ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', host)
+                    if ip_match:
+                        ip_address = ip_match.group()
+                        break
+        
+        if ip_address:
+            device_name = device_entry.name or ""
+            if ip_address not in ip_to_device_names:
+                ip_to_device_names[ip_address] = []
+            ip_to_device_names[ip_address].append(device_name)
+    
+    # Now build name->IP map with all name variations
+    for ip_address, device_names in ip_to_device_names.items():
+        for device_name in device_names:
+            # Create all possible name variations
+            name_variations = [
+                device_name.lower().replace(" ", "_").replace("-", "_"),
+                device_name.lower().replace(" ", "_"),
+                device_name.lower().replace("-", "_"),
+                device_name.lower(),
+                # Also try without common suffixes
+                device_name.lower().replace(" camera", "").replace(" ", "_"),
+                device_name.lower().replace(" camera", "").replace("-", "_"),
+            ]
+            for name_var in name_variations:
+                if name_var:  # Don't add empty strings
+                    camera_name_to_ip[name_var] = ip_address
+            _LOGGER.info("Mapped device name '%s' to IP %s (variations: %s)", 
+                       device_name, ip_address, name_variations[:3])
     
     # Now find Frigate devices and update them
     frigate_devices_updated = 0
@@ -209,21 +242,8 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 camera_ip = ip_match.group()
                 _LOGGER.info("Extracted IP %s from Frigate device name '%s'", camera_ip, device_name)
         
-        # Method 3: Check device's entities for stream URLs
-        if not camera_ip:
-            for entity_entry in entity_registry.entities.values():
-                if entity_entry.device_id == device_entry.id and entity_entry.domain == "camera":
-                    state = hass.states.get(entity_entry.entity_id)
-                    if state and hasattr(state, "attributes"):
-                        stream_source = state.attributes.get("stream_source") or state.attributes.get("entity_picture")
-                        if stream_source:
-                            ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', stream_source)
-                            if ip_match:
-                                camera_ip = ip_match.group(1)
-                                _LOGGER.info("Found IP %s for Frigate device '%s' from entity stream", camera_ip, device_name)
-                                break
-                    if camera_ip:
-                        break
+        # Method 3: Check device's entities for stream URLs (but Frigate uses go2rtc proxy, so this won't work)
+        # Skip this - Frigate cameras go through go2rtc proxy at 127.0.0.1
         
         # If we found an IP, look up MAC address
         if camera_ip and camera_ip in ip_to_mac:
