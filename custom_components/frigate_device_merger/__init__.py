@@ -159,14 +159,20 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 if ip_match:
                     ip_address = ip_match.group()
                     # Get device name from device registry
-                    device_registry_temp = dr.async_get(hass)
-                    for device_entry in device_registry_temp.devices.values():
+                    for device_entry in device_registry.devices.values():
                         if config_entry.entry_id in device_entry.config_entries:
                             device_name = device_entry.name or ""
-                            # Normalize name for matching
-                            name_normalized = device_name.lower().replace(" ", "_").replace("-", "_")
-                            camera_name_to_ip[name_normalized] = ip_address
-                            _LOGGER.info("Mapped camera name '%s' to IP %s from %s integration", device_name, ip_address, config_entry.domain)
+                            # Normalize name for matching - try multiple variations
+                            name_variations = [
+                                device_name.lower().replace(" ", "_").replace("-", "_"),
+                                device_name.lower().replace(" ", "_"),
+                                device_name.lower().replace("-", "_"),
+                                device_name.lower(),
+                            ]
+                            for name_var in name_variations:
+                                camera_name_to_ip[name_var] = ip_address
+                            _LOGGER.info("Mapped camera name '%s' (variations: %s) to IP %s from %s integration", 
+                                       device_name, name_variations[:2], ip_address, config_entry.domain)
                             break
     
     # Now find Frigate devices and update them
