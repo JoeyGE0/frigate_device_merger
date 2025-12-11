@@ -284,31 +284,60 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                     break
             
             if not has_mac:
-                # Get current identifiers and connections
-                current_identifiers = set(device_entry.identifiers)
-                current_connections = set(device_entry.connections)
+                # Check if MAC is already registered to another device
+                mac_already_registered = False
+                for other_device in device_registry.devices.values():
+                    if other_device.id == device_entry.id:
+                        continue  # Skip self
+                    for conn_type, conn_id in other_device.connections:
+                        if conn_type == dr.CONNECTION_NETWORK_MAC and conn_id.lower() == mac_address:
+                            mac_already_registered = True
+                            _LOGGER.info(
+                                "MAC %s already registered to device '%s' (%s). "
+                                "Home Assistant will merge devices automatically.",
+                                mac_address, other_device.name or "Unknown", other_device.manufacturer or "Unknown"
+                            )
+                            break
+                    if mac_already_registered:
+                        break
                 
-                # Add MAC address identifier and connection
-                new_identifiers = current_identifiers.copy()
-                new_identifiers.add(("mac", mac_address))
-                
-                new_connections = current_connections.copy()
-                new_connections.add((dr.CONNECTION_NETWORK_MAC, mac_address))
-                
-                # Update device registry
-                device_registry.async_update_device(
-                    device_entry.id,
-                    new_identifiers=new_identifiers,
-                    new_connections=new_connections,
-                )
-                
-                frigate_devices_updated += 1
-                _LOGGER.info(
-                    "✓ Updated Frigate device '%s' (IP: %s) with MAC address: %s",
-                    device_name,
-                    camera_ip,
-                    mac_address,
-                )
+                if not mac_already_registered:
+                    # Get current identifiers and connections
+                    current_identifiers = set(device_entry.identifiers)
+                    current_connections = set(device_entry.connections)
+                    
+                    # Add MAC address identifier and connection
+                    new_identifiers = current_identifiers.copy()
+                    new_identifiers.add(("mac", mac_address))
+                    
+                    new_connections = current_connections.copy()
+                    new_connections.add((dr.CONNECTION_NETWORK_MAC, mac_address))
+                    
+                    # Update device registry
+                    try:
+                        device_registry.async_update_device(
+                            device_entry.id,
+                            new_identifiers=new_identifiers,
+                            new_connections=new_connections,
+                        )
+                        
+                        frigate_devices_updated += 1
+                        _LOGGER.info(
+                            "✓ Updated Frigate device '%s' (IP: %s) with MAC address: %s",
+                            device_name,
+                            camera_ip,
+                            mac_address,
+                        )
+                    except Exception as e:
+                        # Handle collision errors gracefully
+                        if "DeviceConnectionCollisionError" in str(type(e).__name__) or "already registered" in str(e).lower():
+                            _LOGGER.info(
+                                "MAC %s collision detected for device '%s'. "
+                                "This is expected - Home Assistant will merge devices automatically.",
+                                mac_address, device_name
+                            )
+                        else:
+                            raise
             else:
                 _LOGGER.info("Frigate device '%s' already has MAC address", device_name)
         elif camera_ip:
