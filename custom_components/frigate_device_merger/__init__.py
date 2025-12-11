@@ -5,8 +5,9 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, Event
 from homeassistant.helpers import device_registry as dr
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -15,19 +16,6 @@ DOMAIN = "frigate_device_merger"
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Frigate Device Merger component."""
-    
-    async def update_frigate_devices_service(call: ServiceCall) -> None:
-        """Service to manually trigger Frigate device update."""
-        _LOGGER.info("Manual update triggered via service call")
-        await async_update_frigate_devices(hass)
-    
-    # Register service
-    hass.services.async_register(
-        DOMAIN,
-        "update_devices",
-        update_frigate_devices_service,
-    )
-    
     return True
 
 
@@ -35,13 +23,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Frigate Device Merger from a config entry."""
     import asyncio
     
-    # Wait a bit for other integrations to finish setting up
-    async def delayed_update():
-        await asyncio.sleep(10)  # Wait 10 seconds for other integrations to initialize
+    async def delayed_update(event: Event = None):
+        """Wait for Home Assistant to fully start and other integrations to initialize."""
+        # Wait longer for everything to be ready
+        await asyncio.sleep(30)
+        _LOGGER.info("Starting Frigate device merger update...")
         await async_update_frigate_devices(hass)
     
-    # Schedule update after startup
-    hass.async_create_task(delayed_update())
+    # Listen for Home Assistant start event, then wait additional time
+    async def on_started(event: Event):
+        hass.async_create_task(delayed_update(event))
+    
+    # If already started, run immediately with delay
+    if hass.is_running:
+        hass.async_create_task(delayed_update())
+    else:
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, on_started)
     
     return True
 
@@ -243,7 +240,32 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
                 camera_ip,
             )
     
+    # Log summary
+    frigate_camera_count = sum(1 for d in device_registry.devices.values() 
+                              for domain, _ in d.identifiers if domain == "frigate")
+    
+    _LOGGER.info(
+        "Frigate Device Merger scan complete: Found %d Frigate camera(s), "
+        "%d IP-to-MAC mappings from other integrations, updated %d camera(s)",
+        frigate_camera_count,
+        len(ip_to_mac),
+        frigate_devices_updated
+    )
+    
     if frigate_devices_updated > 0:
-        _LOGGER.info("Updated %d Frigate camera(s) with MAC addresses for device merging", frigate_devices_updated)
+        _LOGGER.info("Successfully updated %d Frigate camera(s) with MAC addresses for device merging", frigate_devices_updated)
+    elif frigate_camera_count == 0:
+        _LOGGER.info("No Frigate cameras found. Make sure Frigate integration is set up.")
+    elif len(ip_to_mac) == 0:
+        _LOGGER.info(
+            "Found %d Frigate camera(s) but no MAC addresses from other integrations. "
+            "Make sure your camera integrations (Hikvision, Unifi, etc.) are configured and include MAC addresses.",
+            frigate_camera_count
+        )
     else:
-        _LOGGER.warning("No Frigate cameras were updated. Make sure other integrations are set up first.")
+        _LOGGER.info(
+            "Found %d Frigate camera(s) and %d MAC address(es) from other integrations, "
+            "but couldn't match them by IP address. Check that IP addresses match between Frigate and other integrations.",
+            frigate_camera_count,
+            len(ip_to_mac)
+        )
