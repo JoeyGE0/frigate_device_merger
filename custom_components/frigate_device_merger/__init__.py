@@ -165,11 +165,76 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
     
     _LOGGER.info("Found %d IP-to-MAC mappings from other integrations", len(ip_to_mac))
     
-    # Build a map of camera names to IPs from other integrations' config entries
-    # We match Frigate camera device names to other integration device names, then get IP from config
-    camera_name_to_ip: dict[str, str] = {}
+    # Get Frigate camera IPs from Frigate API/config
+    # This is the correct source - Frigate knows the real camera IPs
+    frigate_camera_to_ip: dict[str, str] = {}
     
-    # First, build IP->device_name map from devices we already scanned
+    # Try to get Frigate config from API
+    frigate_config_entry = None
+    for config_entry in hass.config_entries.async_entries("frigate"):
+        frigate_config_entry = config_entry
+        break
+    
+    if frigate_config_entry:
+        try:
+            # Get Frigate URL from config
+            frigate_url = frigate_config_entry.data.get("url") or frigate_config_entry.data.get("host", "http://ccab4aaf-frigate:5000")
+            if not frigate_url.startswith("http"):
+                frigate_url = f"http://{frigate_url}"
+            
+            # Call Frigate API to get config
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(f"{frigate_url}/api/config", timeout=aiohttp.ClientTimeout(total=5)) as response:
+                        if response.status == 200:
+                            config_data = await response.json()
+                            
+                            # Extract camera IPs from go2rtc streams (most reliable)
+                            if "go2rtc" in config_data and "streams" in config_data["go2rtc"]:
+                                for camera_name, stream_configs in config_data["go2rtc"]["streams"].items():
+                                    if isinstance(stream_configs, list):
+                                        for stream_config in stream_configs:
+                                            if isinstance(stream_config, str) and stream_config.startswith("rtsp://"):
+                                                # Extract IP from RTSP URL: rtsp://user:pass@IP:port/path
+                                                ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', stream_config)
+                                                if ip_match:
+                                                    frigate_camera_to_ip[camera_name.lower()] = ip_match.group(1)
+                                                    _LOGGER.info("Got IP %s for Frigate camera '%s' from go2rtc config", ip_match.group(1), camera_name)
+                                                    break
+                            
+                            # Also check cameras section for IPs in ffmpeg inputs
+                            if "cameras" in config_data:
+                                for camera_name, camera_config in config_data["cameras"].items():
+                                    if camera_name.lower() not in frigate_camera_to_ip:
+                                        if "ffmpeg" in camera_config and "inputs" in camera_config["ffmpeg"]:
+                                            for input_config in camera_config["ffmpeg"]["inputs"]:
+                                                if isinstance(input_config, dict) and "path" in input_config:
+                                                    path = input_config["path"]
+                                                    if path.startswith("rtsp://"):
+                                                        ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', path)
+                                                        if ip_match:
+                                                            frigate_camera_to_ip[camera_name.lower()] = ip_match.group(1)
+                                                            _LOGGER.info("Got IP %s for Frigate camera '%s' from ffmpeg config", ip_match.group(1), camera_name)
+                                                            break
+                                                elif isinstance(input_config, str) and input_config.startswith("rtsp://"):
+                                                    ip_match = re.search(r'@([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', input_config)
+                                                    if ip_match:
+                                                        frigate_camera_to_ip[camera_name.lower()] = ip_match.group(1)
+                                                        _LOGGER.info("Got IP %s for Frigate camera '%s' from ffmpeg input", ip_match.group(1), camera_name)
+                                                        break
+                            
+                            _LOGGER.info("Got %d camera IPs from Frigate API", len(frigate_camera_to_ip))
+                except Exception as e:
+                    _LOGGER.warning("Failed to get Frigate config from API: %s", e)
+        except Exception as e:
+            _LOGGER.warning("Failed to access Frigate API: %s", e)
+    
+    # Fallback: Build a map of camera names to IPs from other integrations' config entries
+    # Only use this if we couldn't get IPs from Frigate API
+    camera_name_to_ip: dict[str, str] = {}
+    if not frigate_camera_to_ip:
+        # First, build IP->device_name map from devices we already scanned
     ip_to_device_names: dict[str, list[str]] = {}
     for device_entry in device_registry.devices.values():
         # Skip Frigate devices
@@ -228,6 +293,9 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
             _LOGGER.info("Mapped device name '%s' to IP %s (variations: %s)", 
                        device_name, ip_address, name_variations[:3])
     
+    _LOGGER.info("Frigate camera IPs: %s", frigate_camera_to_ip)
+    _LOGGER.info("Fallback camera name IPs: %s", camera_name_to_ip)
+    
     # Now find Frigate devices and update them
     frigate_devices_updated = 0
     frigate_camera_count = 0
@@ -257,12 +325,17 @@ async def async_update_frigate_devices(hass: HomeAssistant) -> None:
         # Try to find IP for this Frigate camera
         camera_ip = None
         
-        # Method 1: Match by camera name from other integrations
-        if camera_name_normalized in camera_name_to_ip:
-            camera_ip = camera_name_to_ip[camera_name_normalized]
-            _LOGGER.info("Matched Frigate camera '%s' to IP %s by name", device_name, camera_ip)
+        # Method 1: Get IP from Frigate API/config (most reliable)
+        if camera_name_normalized in frigate_camera_to_ip:
+            camera_ip = frigate_camera_to_ip[camera_name_normalized]
+            _LOGGER.info("Got IP %s for Frigate camera '%s' from Frigate config", camera_ip, device_name)
         
-        # Method 2: Try to extract IP from device name
+        # Method 2: Match by camera name from other integrations (fallback)
+        if not camera_ip and camera_name_normalized in camera_name_to_ip:
+            camera_ip = camera_name_to_ip[camera_name_normalized]
+            _LOGGER.info("Matched Frigate camera '%s' to IP %s by name from other integration", device_name, camera_ip)
+        
+        # Method 3: Try to extract IP from device name
         if not camera_ip:
             ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', device_name)
             if ip_match:
