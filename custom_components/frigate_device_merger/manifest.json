@@ -1,0 +1,12 @@
+{
+  "domain": "frigate_device_merger",
+  "name": "Frigate Device Merger",
+  "version": "1.0.0",
+  "documentation": "https://github.com/JoeyGE0/frigate_device_merger",
+  "issue_tracker": "https://github.com/JoeyGE0/frigate_device_merger/issues",
+  "requirements": [],
+  "dependencies": ["frigate"],
+  "codeowners": ["@JoeyGE0"],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}
